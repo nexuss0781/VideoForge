@@ -1,0 +1,4 @@
+build/
+demo/generated/
+demo/output/
+*.tmp
