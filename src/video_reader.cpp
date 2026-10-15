@@ -1,11 +1,14 @@
 #include "frameforge/video_reader.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 extern "C" {
+#include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/pixdesc.h>
 }
@@ -19,6 +22,181 @@ namespace {
 
 bool validRational(AVRational value) noexcept {
     return value.num > 0 && value.den > 0;
+}
+
+bool sameRational(AVRational left, AVRational right) noexcept {
+    return validRational(left) && validRational(right) &&
+           static_cast<std::int64_t>(left.num) * right.den ==
+               static_cast<std::int64_t>(right.num) * left.den;
+}
+
+std::string colorRangeName(AVColorRange value) {
+    if (value == AVCOL_RANGE_UNSPECIFIED) {
+        return {};
+    }
+    const char* name = av_color_range_name(value);
+    return name != nullptr && av_color_range_from_name(name) == value ? name : "";
+}
+
+std::string colorPrimariesName(AVColorPrimaries value) {
+    if (value == AVCOL_PRI_UNSPECIFIED) {
+        return {};
+    }
+    const char* name = av_color_primaries_name(value);
+    return name != nullptr && av_color_primaries_from_name(name) == value ? name : "";
+}
+
+std::string colorTransferName(AVColorTransferCharacteristic value) {
+    if (value == AVCOL_TRC_UNSPECIFIED) {
+        return {};
+    }
+    const char* name = av_color_transfer_name(value);
+    return name != nullptr && av_color_transfer_from_name(name) == value ? name : "";
+}
+
+std::string colorSpaceName(AVColorSpace value) {
+    if (value == AVCOL_SPC_UNSPECIFIED) {
+        return {};
+    }
+    const char* name = av_color_space_name(value);
+    return name != nullptr && av_color_space_from_name(name) == value ? name : "";
+}
+
+std::string chromaLocationName(AVChromaLocation value) {
+    if (value == AVCHROMA_LOC_UNSPECIFIED) {
+        return {};
+    }
+    const char* name = av_chroma_location_name(value);
+    return name != nullptr && av_chroma_location_from_name(name) == value ? name : "";
+}
+
+std::string fieldOrderName(AVFieldOrder value) {
+    switch (value) {
+        case AV_FIELD_UNKNOWN: return {};
+        case AV_FIELD_PROGRESSIVE: return "progressive";
+        case AV_FIELD_TT: return "tt";
+        case AV_FIELD_BB: return "bb";
+        case AV_FIELD_TB: return "tb";
+        case AV_FIELD_BT: return "bt";
+        default: return {};
+    }
+}
+
+bool supportedFieldOrder(AVFieldOrder value) noexcept {
+    return value == AV_FIELD_UNKNOWN || value == AV_FIELD_PROGRESSIVE ||
+           value == AV_FIELD_TT || value == AV_FIELD_BB ||
+           value == AV_FIELD_TB || value == AV_FIELD_BT;
+}
+
+bool consistentSampleAspectRatio(const AVStream& stream) noexcept {
+    const AVRational streamRatio = stream.sample_aspect_ratio;
+    const AVRational codecRatio = stream.codecpar->sample_aspect_ratio;
+    return !validRational(streamRatio) || !validRational(codecRatio) ||
+           sameRational(streamRatio, codecRatio);
+}
+
+AVRational selectedSampleAspectRatio(const AVStream& stream) noexcept {
+    if (validRational(stream.sample_aspect_ratio)) {
+        return stream.sample_aspect_ratio;
+    }
+    if (validRational(stream.codecpar->sample_aspect_ratio)) {
+        return stream.codecpar->sample_aspect_ratio;
+    }
+    return AVRational{1, 1};
+}
+
+bool hasOnlyNonSemanticTags(const AVDictionary* dictionary,
+                            bool formatDictionary) {
+    const AVDictionaryEntry* entry = nullptr;
+    while ((entry = av_dict_get(dictionary, "", entry,
+                                AV_DICT_IGNORE_SUFFIX)) != nullptr) {
+        std::string key(entry->key != nullptr ? entry->key : "");
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char value) {
+                           return static_cast<char>(std::tolower(value));
+                       });
+        const std::string_view value(entry->value != nullptr ? entry->value : "");
+        if (key == "encoder") {
+            continue;
+        }
+        if (formatDictionary &&
+            (key == "major_brand" || key == "minor_version" ||
+             key == "compatible_brands")) {
+            continue;
+        }
+        if (!formatDictionary &&
+            ((key == "handler_name" && value == "VideoHandler") ||
+             (key == "language" && value == "und") ||
+             (key == "vendor_id" && value == "[0][0][0][0]"))) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool hasSupportedDisplayMetadata(const AVStream& stream) {
+    const AVCodecParameters& parameters = *stream.codecpar;
+    const bool namesSupported =
+        (parameters.color_range == AVCOL_RANGE_UNSPECIFIED ||
+         !colorRangeName(parameters.color_range).empty()) &&
+        (parameters.color_primaries == AVCOL_PRI_UNSPECIFIED ||
+         !colorPrimariesName(parameters.color_primaries).empty()) &&
+        (parameters.color_trc == AVCOL_TRC_UNSPECIFIED ||
+         !colorTransferName(parameters.color_trc).empty()) &&
+        (parameters.color_space == AVCOL_SPC_UNSPECIFIED ||
+         !colorSpaceName(parameters.color_space).empty()) &&
+        (parameters.chroma_location == AVCHROMA_LOC_UNSPECIFIED ||
+         !chromaLocationName(parameters.chroma_location).empty());
+    return namesSupported && supportedFieldOrder(parameters.field_order) &&
+           consistentSampleAspectRatio(stream) &&
+           parameters.nb_coded_side_data == 0;
+}
+
+bool hasSerializableAudioMetadata(const AVStream& stream) noexcept {
+    const AVCodecParameters* parameters = stream.codecpar;
+    if (parameters == nullptr || parameters->codec_type != AVMEDIA_TYPE_AUDIO ||
+        parameters->codec_id == AV_CODEC_ID_NONE || !validRational(stream.time_base) ||
+        parameters->extradata_size < 0 ||
+        (parameters->extradata_size > 0 && parameters->extradata == nullptr) ||
+        parameters->nb_coded_side_data < 0 ||
+        (parameters->nb_coded_side_data > 0 && parameters->coded_side_data == nullptr) ||
+        parameters->sample_rate < 0 || parameters->ch_layout.nb_channels < 0) {
+        return false;
+    }
+    return true;
+}
+
+bool hasSupportedNativeStreamSet(const AVFormatContext& format,
+                                 int videoStreamIndex) noexcept {
+    if (format.nb_chapters != 0U || format.nb_programs != 0U) {
+        return false;
+    }
+    std::uint32_t videoStreams = 0U;
+    for (unsigned int index = 0; index < format.nb_streams; ++index) {
+        const AVStream* stream = format.streams[index];
+        if (stream == nullptr || stream->codecpar == nullptr) {
+            return false;
+        }
+        if (static_cast<int>(index) == videoStreamIndex) {
+            if (stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO ||
+                (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) {
+                return false;
+            }
+            ++videoStreams;
+        } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            if (!hasSerializableAudioMetadata(*stream)) {
+                return false;
+            }
+        } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            // Multiple video streams, including alternate angles, are not
+            // represented by the current single-video native archive.
+            return false;
+        } else {
+            return false;
+        }
+    }
+    return videoStreams == 1U;
 }
 
 }  // namespace
@@ -99,12 +277,31 @@ VideoReader::VideoReader(const std::string& path, int threadCount) {
     metadata_.width = codecContext_->width;
     metadata_.height = codecContext_->height;
     metadata_.timeBase = stream->time_base;
+    metadata_.colorRange = colorRangeName(stream->codecpar->color_range);
+    metadata_.colorPrimaries = colorPrimariesName(stream->codecpar->color_primaries);
+    metadata_.colorTransfer = colorTransferName(stream->codecpar->color_trc);
+    metadata_.colorSpace = colorSpaceName(stream->codecpar->color_space);
+    metadata_.chromaLocation = chromaLocationName(stream->codecpar->chroma_location);
+    const AVRational sampleAspectRatio = selectedSampleAspectRatio(*stream);
+    metadata_.sampleAspectRatioNumerator =
+        static_cast<std::uint32_t>(sampleAspectRatio.num);
+    metadata_.sampleAspectRatioDenominator =
+        static_cast<std::uint32_t>(sampleAspectRatio.den);
+    metadata_.fieldOrder = fieldOrderName(stream->codecpar->field_order);
     metadata_.bitRate = stream->codecpar->bit_rate > 0
                             ? stream->codecpar->bit_rate
                             : formatContext_->bit_rate;
     metadata_.containerFrameHint = stream->nb_frames > 0
                                        ? static_cast<std::uint64_t>(stream->nb_frames)
                                        : 0;
+    metadata_.audioStreamCount = 0U;
+    for (unsigned int index = 0; index < formatContext_->nb_streams; ++index) {
+        const AVStream* candidate = formatContext_->streams[index];
+        if (candidate != nullptr && candidate->codecpar != nullptr &&
+            candidate->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            ++metadata_.audioStreamCount;
+        }
+    }
     AVRational rate = stream->avg_frame_rate;
     if (!validRational(rate)) {
         rate = stream->r_frame_rate;
@@ -125,6 +322,11 @@ VideoReader::VideoReader(const std::string& path, int threadCount) {
     }
     const char* pixelName = av_get_pix_fmt_name(pixelFormat);
     metadata_.pixelFormat = pixelName != nullptr ? pixelName : "unknown";
+    metadata_.nativeFrameArchiveEligible =
+        hasSupportedNativeStreamSet(*formatContext_, videoStreamIndex_) &&
+        hasOnlyNonSemanticTags(formatContext_->metadata, true) &&
+        hasOnlyNonSemanticTags(stream->metadata, false) &&
+        hasSupportedDisplayMetadata(*stream);
     decoderThreadCount_ = threadCount;
 }
 

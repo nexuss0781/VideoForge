@@ -1,5 +1,6 @@
 #include "frameforge/analyzer.hpp"
 #include "frameforge/png_writer.hpp"
+#include "frameforge/video_archive.hpp"
 #include "frameforge/video_reader.hpp"
 
 #include <algorithm>
@@ -93,6 +94,8 @@ Usage:
   frameforge extract INPUT --out DIRECTORY
                          [--indices 0,12,99] [--ranges 100:120,500:520]
                          [--threads N]
+  frameforge pack INPUT --out ARCHIVE.vfs [--threads N] [--compression 0..9]
+  frameforge unpack ARCHIVE.vfs --out OUTPUT
 
 Commands:
   analyze  Decode every video frame, count them exactly, emit per-frame image
@@ -101,12 +104,20 @@ Commands:
   extract  Decode sequentially and export the exact requested zero-based frames
            as lossless PNG files, with a manifest.json. Ranges are inclusive.
            Provide --indices and/or --ranges; at least one is required.
+  pack     Compare measured sizes for checksummed native planes (VFS3/VFS4/VFS5)
+           and a byte-preserving source-file representation; store the smaller
+           safe candidate. VFS5 stores compressed audio packets when NUT can
+           preserve stream metadata and timestamps exactly.
+  unpack   Restore source-file archives byte-for-byte, or validate VFS1–VFS5 and
+           create lossless NUT output; VFS5 restores audio packets without
+           decoding or re-encoding them.
 
 Options:
   --threads N       FFmpeg decoder threads; 0 lets FFmpeg choose (default 0).
   --threshold X     Scene heuristic threshold in (0,1], default 0.30.
   --sample-width N  Analysis thumbnail width, default 96 pixels.
   --sample-height N Analysis thumbnail height, default 54 pixels.
+  --compression N   VFS Zstandard effort level 0 (fastest) through 9, default 1.
   --help            Show this help.
 
 This tool performs deterministic technical and visual-change analysis, not
@@ -341,6 +352,77 @@ int extractCommand(const std::string& inputPath, int argc, char** argv) {
     return 0;
 }
 
+void printArchiveStats(std::string_view operation, const std::string& inputPath,
+                       const std::string& outputPath,
+                       const frameforge::VideoArchiveStats& stats) {
+    std::cout << std::setprecision(9)
+              << "{\"operation\":\"" << operation
+              << "\",\"input\":\"" << frameforge::jsonEscape(inputPath)
+              << "\",\"output\":\"" << frameforge::jsonEscape(outputPath)
+              << "\",\"width\":" << stats.width
+              << ",\"height\":" << stats.height
+              << ",\"pixel_format\":\""
+              << frameforge::jsonEscape(stats.pixelFormat) << "\""
+              << ",\"frame_count\":" << stats.frameCount
+              << ",\"frame_count_exact\":"
+              << (stats.frameCountIsExact ? "true" : "false")
+              << ",\"representation_mode\":\""
+              << frameforge::jsonEscape(stats.representationMode) << "\""
+              << ",\"representation_reason\":\""
+              << frameforge::jsonEscape(stats.representationReason) << "\""
+              << ",\"input_bytes\":" << stats.inputBytes
+              << ",\"output_bytes\":" << stats.outputBytes
+              << ",\"output_input_ratio\":" << stats.outputInputRatio
+              << ",\"native_archive_bytes\":" << stats.nativeArchiveBytes
+              << ",\"source_file_archive_bytes\":" << stats.sourceFileArchiveBytes
+              << ",\"elapsed_seconds\":" << stats.elapsedSeconds
+              << ",\"frames_per_second\":" << stats.framesPerSecond << "}\n";
+}
+
+int packCommand(const std::string& inputPath, int argc, char** argv) {
+    std::string outputPath;
+    int threads = 0;
+    int compression = 1;
+    for (int i = 3; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--out" && i + 1 < argc) {
+            outputPath = argv[++i];
+        } else if (option == "--threads" && i + 1 < argc) {
+            threads = parseInt(argv[++i], "thread count", 0, 256);
+        } else if (option == "--compression" && i + 1 < argc) {
+            compression = parseInt(argv[++i], "compression level", 0, 9);
+        } else {
+            throw std::invalid_argument("unknown or incomplete pack option: " + option);
+        }
+    }
+    if (outputPath.empty()) {
+        throw std::invalid_argument("pack requires --out ARCHIVE.vfs");
+    }
+    const frameforge::VideoArchiveStats stats =
+        frameforge::packVideoFile(inputPath, outputPath, threads, compression);
+    printArchiveStats("pack", inputPath, outputPath, stats);
+    return 0;
+}
+
+int unpackCommand(const std::string& inputPath, int argc, char** argv) {
+    std::string outputPath;
+    for (int i = 3; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--out" && i + 1 < argc) {
+            outputPath = argv[++i];
+        } else {
+            throw std::invalid_argument("unknown or incomplete unpack option: " + option);
+        }
+    }
+    if (outputPath.empty()) {
+        throw std::invalid_argument("unpack requires --out VIDEO.nut");
+    }
+    const frameforge::VideoArchiveStats stats =
+        frameforge::unpackVideoFile(inputPath, outputPath);
+    printArchiveStats("unpack", inputPath, outputPath, stats);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -362,6 +444,18 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("extract requires an input video path");
             }
             return extractCommand(argv[2], argc, argv);
+        }
+        if (command == "pack") {
+            if (argc < 3) {
+                throw std::invalid_argument("pack requires an input video path");
+            }
+            return packCommand(argv[2], argc, argv);
+        }
+        if (command == "unpack") {
+            if (argc < 3) {
+                throw std::invalid_argument("unpack requires a VFS archive path");
+            }
+            return unpackCommand(argv[2], argc, argv);
         }
         printUsage(std::cerr);
         throw std::invalid_argument("unknown command: " + command);

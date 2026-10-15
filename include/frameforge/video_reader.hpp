@@ -21,7 +21,19 @@ struct VideoMetadata {
     double durationSeconds = 0.0;
     std::int64_t bitRate = 0;
     std::uint64_t containerFrameHint = 0;
+    std::uint32_t audioStreamCount = 0;
     AVRational timeBase{0, 1};
+    std::string colorRange;
+    std::string colorPrimaries;
+    std::string colorTransfer;
+    std::string colorSpace;
+    std::string chromaLocation;
+    std::uint32_t sampleAspectRatioNumerator = 1;
+    std::uint32_t sampleAspectRatioDenominator = 1;
+    std::string fieldOrder;
+    // False when packing decoded planes alone would discard additional streams,
+    // chapters, user metadata, or known display-affecting stream properties.
+    bool nativeFrameArchiveEligible = false;
 };
 
 class VideoReader final {
