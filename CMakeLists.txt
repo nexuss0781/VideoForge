@@ -18,6 +18,7 @@ pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 add_library(frameforge_codec STATIC
     src/frame_codec.cpp
     src/frame_stream.cpp
+    src/language_transform.cpp
 )
 target_include_directories(frameforge_codec PUBLIC include)
 target_link_libraries(frameforge_codec PUBLIC ZLIB::ZLIB PkgConfig::ZSTD)
@@ -57,6 +58,21 @@ target_compile_options(frameforge_codec_test PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2
 )
 add_test(NAME frameforge_codec_unit COMMAND frameforge_codec_test)
+
+add_executable(frameforge_language_transform_test tests/language_transform_test.cpp)
+target_link_libraries(frameforge_language_transform_test PRIVATE frameforge_codec)
+target_compile_options(frameforge_language_transform_test PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2
+)
+add_test(NAME frameforge_language_transform_unit COMMAND frameforge_language_transform_test)
+
+add_executable(frameforge_language_transform_benchmark
+    benchmarks/language_transform_benchmark.cpp
+)
+target_link_libraries(frameforge_language_transform_benchmark PRIVATE frameforge_codec)
+target_compile_options(frameforge_language_transform_benchmark PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2
+)
 
 add_executable(frameforge_stream_test tests/frame_stream_test.cpp)
 target_link_libraries(frameforge_stream_test PRIVATE frameforge_codec)
